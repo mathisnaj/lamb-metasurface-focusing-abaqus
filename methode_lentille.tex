@@ -1,0 +1,158 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[french]{babel}
+\usepackage{lmodern}
+\usepackage{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{hyperref}
+\geometry{margin=25mm}
+\title{Optimisation d'une métasurface par FEM élastique transitoire\\
+\large Réseau de géométrie et adjoint discret --- V4}
+\author{Note technique}
+\date{\today}
+\begin{document}
+\maketitle
+\tableofcontents
+
+\section{Objet et géométrie}
+On recherche une carte de plots sur les deux faces d'une plaque pour
+concentrer une onde supposée incidente depuis la droite sur une ligne
+\(x=x_f\). La plaque et les plots sont décrits par des éléments
+hexaédriques élastiques. Le réseau paramètre la géométrie, pas le champ :
+ce n'est donc pas un PINN classique. La source ponctuelle représente une
+onde retour supposée ; aucun défaut réel n'est simulé.
+
+Dans la zone optimisable, le réseau produit une hauteur \(h_e\in[0,H]\)
+en unités de couches, avec \(H=\texttt{MAX\_HEIGHT}\). Les plots sont des
+colonnes pleines symétriques sur les faces supérieure et inférieure.
+Une même colonne occupe toute la base d'un élément du maillage dans le plan.
+
+\section{Réseau et périodes}
+Deux paramètres appris \(a_x,a_y\) définissent des périodes nominales bornées
+par une sigmoïde :
+\[
+p_x=p_x^{\min}+(p_x^{\max}-p_x^{\min})\sigma(a_x),\qquad
+p_y=p_y^{\min}+(p_y^{\max}-p_y^{\min})\sigma(a_y).
+\]
+En chaque centre d'élément, le réseau reçoit les coordonnées normalisées
+ainsi que les sinus et cosinus des phases périodiques dans les deux
+directions. Il utilise deux couches cachées \(\tanh\), puis une sigmoïde.
+Sa sortie est multipliée par deux enveloppes périodiques et par \(H\).
+Les symétries demandées sont appliquées par moyenne avec les cartes
+miroirs. Ces périodes sont nominales : l'arrondi et la modulation spatiale
+peuvent modifier les espacements effectifs.
+
+\section{Relaxation des couches}
+Une hauteur continue permet de différencier le calcul. Pour une couche
+d'indice \(k=0,\ldots,H-1\), on définit sa fraction de remplissage
+\[
+\phi_{ek}=\max(0,\min(1,h_e-k)),\qquad
+\rho_{ek}=\varepsilon+(1-\varepsilon)\phi_{ek},
+\]
+où \(\varepsilon=\texttt{V4\_VOID\_FRACTION}\in(0,1)\).
+La rigidité et la masse élémentaires des plots sont multipliées par
+\(\rho_{ek}\) ; les deux faces utilisent la même fraction. La plaque
+reste pleine. Les masses sont diagonalisées par sommation élémentaire.
+Cette interpolation maintient un maillage et des masses strictement
+positives, mais le vide résiduel et les couches intermédiaires ne sont pas
+physiques et peuvent introduire des modes parasites. Aux points
+non différentiables \(h_e=k\), l'implémentation prend une dérivée nulle.
+
+Les matrices assemblées sont notées \(K(h)\) et \(M(h)\), avec \(M\)
+diagonale. Les équations discrétisées sont
+\[
+ M(h)\ddot u(t)+K(h)u(t)=f(t).
+\]
+La source est une impulsion sinusoïdale fenêtrée sur le nombre de cycles
+choisi. Les bords sont libres. Les efforts sur les faces peuvent favoriser
+une parité A ou S sans garantir une excitation modale pure.
+
+\section{Propagation et ligne focale}
+Avec \(\Delta t\) fixe, le schéma explicite est
+\[
+u_{n+1}=2u_n-u_{n-1}
+ +\Delta t^2M^{-1}(f_n-Ku_n),\qquad u_{-1}=u_0=0.
+\]
+Le pas commun aux configurations est borné de façon conservatrice à
+partir des sommes absolues des lignes des matrices élémentaires divisées
+par les masses nodales élémentaires. Il est donc utilisable aussi bien
+pour la référence que pour la carte optimisée.
+
+La ligne contient les nœuds \((x_f,y_j)\), de \(y=0\) à \texttt{WIDTH},
+avec \(x_f\) arrondi au nœud le plus proche. Les poids sont
+\[
+w_j=\frac{q_j\exp[-(y_j-y_c)^2/(2\sigma_f^2)]}
+{\sum_\ell q_\ell\exp[-(y_\ell-y_c)^2/(2\sigma_f^2)]},
+\quad y_c=\frac{\texttt{WIDTH}}2,\quad
+q_j=\begin{cases}\frac12&\text{aux extrémités},\\1&\text{ailleurs}.\end{cases}
+\]
+La largeur \(\sigma_f=\texttt{FOCAL\_SIGMA}\) vaut initialement 50 mm.
+Le critère, sur les instants de \texttt{FOCUS\_WINDOW}, est
+\[
+G(h)=\frac{\displaystyle\sum_jw_j\sum_{n\in W}u_{z,j,n}(h)^2\Delta t}
+{\displaystyle\sum_jw_j\sum_{n\in W}u_{z,j,n}(0)^2\Delta t},
+\qquad J(h)=G(h)-\lambda\frac{\operatorname{moyenne}(h)}H.
+\]
+La référence \(h=0\) est une plaque nue sans matériau résiduel ; \(\lambda\)
+est \texttt{V4\_HEIGHT\_PENALTY}. La grandeur intégrée est \(u_z^2\), non
+l'énergie mécanique totale. Un rapport élevé ne garantit ni une intensité
+uniforme le long de la ligne ni une tache étroite selon \(x\).
+
+\section{Adjoint discret}
+Posons \(A=2I-\Delta t^2M^{-1}K\),
+\(B=-I\), et \(\ell_n(u_n)\) la contribution de l'instant \(n\) au
+gain normalisé. La récurrence adjointe, avec
+\(\lambda_N=\lambda_{N+1}=0\) après le dernier état, est
+\[
+\lambda_n=\nabla_{u_n}\ell_n+A^{\mathsf T}\lambda_{n+1}
+                 +B^{\mathsf T}\lambda_{n+2}.
+\]
+Le gradient d'une hauteur, hors pénalité, s'écrit alors
+\[
+\frac{\partial G}{\partial h_e}
+=-\Delta t^2\sum_n
+\left(\frac{\lambda_{n+1}}{M}\right)^{\mathsf T}
+\left[
+\frac{\partial K}{\partial h_e}u_n+
+\frac{\partial M}{\partial h_e}a_n
+\right],
+\quad
+a_n=M^{-1}(f_n-Ku_n).
+\]
+La division par \(M\) est composante par composante. Les dérivées locales
+de \(K\) et \(M\) viennent de la couche partiellement remplie sur chaque
+face. Le gradient traverse ensuite le réseau et les périodes par
+différentiation automatique ; Adam met à jour ses paramètres.
+
+Les états complets ne sont pas tous stockés : des checkpoints réguliers
+permettent de reconstruire chaque segment pendant le passage adjoint.
+\texttt{V4\_CHECKPOINT\_INTERVAL} règle le compromis mémoire/recalcul.
+Les calculs élastiques restent sur CPU, même si le réseau utilise un GPU.
+
+\section{Sélection de la géométrie entière}
+Tous les \texttt{V4\_DISCRETE\_EVERY} pas, les hauteurs sont arrondies
+en couches entières. Une simulation élastique complète, sans matériau
+résiduel, recalcule le critère avec le même pas de temps et la même
+référence de plaque nue. La meilleure carte selon \(J\) est conservée.
+Si aucune carte entière évaluée ne dépasse l'objectif de la plaque nue,
+la plaque nue est conservée. La meilleure carte relaxée n'est donc pas
+nécessairement la carte finale.
+
+\section{Sorties et limites}
+\texttt{design.npz} contient la carte entière et l'historique ;
+\texttt{optimisation.json} rapporte son gain élastique et ses paramètres ;
+\texttt{convergence.png} compare gains relaxés et entiers ;
+\texttt{metasurface\_3d.png} montre les hauteurs sur les deux faces.
+La vérification séparée produit les signaux, les profils de ligne et une
+animation, avec notamment \texttt{verification\_3d.json} et
+\texttt{ligne\_focale\_3d.png}.
+
+La vérification utilise le même modèle physique que l'optimisation et ne
+constitue pas une validation indépendante. L'optimisation est coûteuse ;
+l'adjoint ne garantit pas un optimum global et la relaxation peut différer
+fortement de la géométrie entière. Le maillage initial correspond à
+environ quatre éléments par longueur d'onde A0 théorique selon \(x\) :
+des études de convergence spatiale et temporelle, un autre solveur et une
+validation expérimentale sont nécessaires avant toute conclusion physique.
+\end{document}

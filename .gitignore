@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+resultats/
+.DS_Store
+.venv*/
+abaqus_runs/
